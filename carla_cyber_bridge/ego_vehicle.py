@@ -305,8 +305,8 @@ class EgoVehicle(Vehicle):
 
         # @todo: do we still need this?
         if not self.parent.get_param("challenge_mode"):
-            localization_msg = self.get_localization_msg()
-            self.write_cyber_message('/apollo/localization/pose', localization_msg)
+            # localization_msg = self.get_localization_msg()
+            # self.write_cyber_message('/apollo/localization/pose', localization_msg)
 
             tfs = TransformStampeds()
             tf_msg = self.get_tf()

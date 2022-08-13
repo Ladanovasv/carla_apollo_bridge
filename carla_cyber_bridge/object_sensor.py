@@ -8,43 +8,85 @@
 """
 handle a object sensor
 """
-import carla
+
+from carla_cyber_bridge.pseudo_actor import PseudoActor
+from carla_cyber_bridge.vehicle import Vehicle
+from carla_cyber_bridge.walker import Walker
 
 from modules.perception.proto.perception_obstacle_pb2 import PerceptionObstacle, PerceptionObstacles
 
-# TODO: hacky: since this isn't an interface to an actual Carla sensor, it's being 
-# instantiated using the bridge constructor's params dict.
-class ObjectSensor(object):
-    def __init__(self, ego_vehicle):
-        self.parent_actor = ego_vehicle.carla_actor
-        self.bridge = ego_vehicle.parent
-        self.seconds_since_write = 0
-        params = self.bridge.params["object_sensor"]
-        self.tick_rate = params.get("tick_rate") or 0.1
-        self.range = params.get("range") or 100
-        self.channel_name = params.get("channel_name") or "/apollo/perception/obstacles"
-        self.callback_id = self.bridge.carla_world.on_tick(self.on_tick)
 
-    def __del__(self):
-        self.bridge.carla_world.remove_on_tick(self.callback_id)
+class ObjectSensor(PseudoActor):
 
-    def on_tick(self, world_snapshot):
+    """
+    Pseudo object sensor
+    """
+
+    def __init__(self, uid, name, parent, node, actor_list):
         """
-        Get a cyber PerceptionObstacles message including all actors within range, except the ego
+        Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param node: node-handle
+        :type node: CompatibleNode
+        :param actor_list: current list of actors
+        :type actor_list: map(carla-actor-id -> python-actor-object)
         """
-        self.seconds_since_write += world_snapshot.delta_seconds
-        if self.seconds_since_write >= self.tick_rate:
-            self.seconds_since_write -= self.tick_rate
-            obstacles = PerceptionObstacles()
-            obstacles.header.CopyFrom(self.bridge.get_cyber_header())
-            for actor in self.bridge.child_actors.values():
-                if actor.carla_actor is not self.parent_actor:
-                    if actor.carla_actor.get_location().distance(self.parent_actor.get_location()) <= self.range:
-                        if isinstance(actor.carla_actor, carla.Vehicle):
-                            obstacles.perception_obstacle.append(actor.get_cyber_obstacle_msg())
-                        elif isinstance(actor.carla_actor, carla.Walker):
-                            msg = actor.get_cyber_obstacle_msg()
-                            msg.type = PerceptionObstacle.Type.PEDESTRIAN
-                            obstacles.perception_obstacle.append(msg)
-            self.bridge.write_cyber_message(self.channel_name, obstacles)
+
+        super(ObjectSensor, self).__init__(uid=uid,
+                                           name=name,
+                                           parent=parent,
+                                           node=node)
+        self.actor_list = actor_list
+        self.object_writer = node.new_writer(self.get_topic_prefix(),
+                                             PerceptionObstacles,
+                                             qos_depth=10)
+
+    def destroy(self):
+        """
+        Function to destroy this object.
+        :return:
+        """
+        super(ObjectSensor, self).destroy()
+        self.actor_list = None
+
+    def get_topic_prefix(self):
+        """
+        get the topic name of the current entity.
+
+        :return: the final topic name of this object
+        :rtype: string
+        """
+        return "/apollo/perception/" + self.name
+
+    @staticmethod
+    def get_blueprint_name():
+        """
+        Get the blueprint identifier for the pseudo sensor
+        :return: name
+        """
+        return "sensor.pseudo.objects"
+
+    def update(self, frame, timestamp):
+        """
+        Function (override) to update this object.
+        On update map sends:
+        - tf global frame
+        :return:
+        """
+        cyber_objects = PerceptionObstacles()
+        cyber_objects.header.CopyFrom(self.get_msg_header(frame_id="map", timestamp=timestamp))
+        for actor_id in self.actor_list.keys():
+            # currently only Vehicles and Walkers are added to the object array
+            if self.parent is None or self.parent.uid != actor_id:
+                actor = self.actor_list[actor_id]
+                if isinstance(actor, Vehicle):
+                    cyber_objects.perception_obstacle.append(actor.get_object_info())
+                elif isinstance(actor, Walker):
+                    cyber_objects.perception_obstacle.append(actor.get_object_info())
+        self.object_writer.write(cyber_objects)

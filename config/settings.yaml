@@ -10,5 +10,5 @@ carla:
     # (the vehicle from CARLA is selected which has the attribute 'role_name' set to this value)
     role_name: ["hero", "ego_vehicle"]
   object_sensor:
-    tick_rate: 0.1
-    range: 100
+    tick_rate: 0.0001
+    range: 1000

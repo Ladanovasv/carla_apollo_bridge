@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 #
 # Copyright (c) 2018-2019 Intel Corporation
 #
@@ -9,16 +8,27 @@
 """
 Classes to handle Carla sensors
 """
-import logging
+
+from __future__ import print_function
+
+import ctypes
+import os
+try:
+    import queue
+except ImportError:
+    import Queue as queue
+import struct
+import sys
 from abc import abstractmethod
+from threading import Lock
 
-import threading
+import carla_common.transforms as trans
+import cyber_compatibility as cybercomp
 
-from cyber_py import cyber, cyber_time
+from carla_cyber_bridge.actor import Actor
 
-from .actor import Actor
-
-import transforms as trans
+from modules.drivers.proto.pointcloud_pb2 import PointXYZIT, PointCloud
+from modules.transform.proto.transform_pb2 import Transform, TransformStamped
 
 
 class Sensor(Actor):
@@ -27,61 +37,106 @@ class Sensor(Actor):
     Actor implementation details for sensors
     """
 
-    @staticmethod
-    def create_actor(carla_actor, parent):
-        """
-        Static factory method to create vehicle actors
-
-        :param carla_actor: carla sensor actor object
-        :type carla_actor: carla.Sensor
-        :param parent: the parent of the new traffic actor
-        :type parent: carla_ros_bridge.Parent
-        :return: the created sensor actor
-        :rtype: carla_ros_bridge.Sensor or derived type
-        """
-        if carla_actor.type_id.startswith("sensor.camera"):
-            return Camera.create_actor(carla_actor=carla_actor, parent=parent)
-        if carla_actor.type_id.startswith("sensor.lidar"):
-            return Lidar(carla_actor=carla_actor, parent=parent)
-        if carla_actor.type_id.startswith("sensor.other.gnss"):
-            return Gnss(carla_actor=carla_actor, parent=parent)
-        if carla_actor.type_id.startswith("sensor.other.collision"):
-            return CollisionSensor(carla_actor=carla_actor, parent=parent)
-        if carla_actor.type_id.startswith("sensor.other.lane_invasion"):
-            return LaneInvasionSensor(carla_actor=carla_actor, parent=parent)
-        else:
-            return Sensor(carla_actor=carla_actor, parent=parent)
-
-    def __init__(self, carla_actor, parent, topic_prefix=None, append_role_name_topic_postfix=True):
+    def __init__(self,
+                 uid,
+                 name,
+                 parent,
+                 relative_spawn_pose,
+                 node,
+                 carla_actor,
+                 synchronous_mode,
+                 is_event_sensor=False,  # only relevant in synchronous_mode:
+                 # if a sensor only delivers data on special events,
+                 # do not wait for it. That means you might get data from a
+                 # sensor, that belongs to a different frame
+                 ):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param relative_spawn_pose: the relative spawn pose of this
+        :type relative_spawn_pose: geometry_msgs.Pose
+        :param node: node-handle
+        :type node: carla_cyber_bridge.CarlaCyberBridge
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
-        :param append_role_name_topic_postfix: if this flag is set True,
-            the role_name of the actor is used as topic postfix
-        :type append_role_name_topic_postfix: boolean
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
+        :param prefix: the topic prefix to be used for this actor
+        :type prefix: string
         """
-        if topic_prefix is None:
-            topic_prefix = 'sensor'
-        super(Sensor, self).__init__(carla_actor=carla_actor,
+        super(Sensor, self).__init__(uid=uid,
+                                     name=name,
                                      parent=parent,
-                                     topic_prefix=topic_prefix,
-                                     append_role_name_topic_postfix=append_role_name_topic_postfix)
+                                     node=node,
+                                     carla_actor=carla_actor)
 
-        self.current_sensor_data = None
-        self.update_lock = threading.Lock()
-        if self.__class__.__name__ == "Sensor":
-            logging.warning("Created Unsupported Sensor(id={}, parent_id={}"
-                          ", type={}, attributes={}".format(
-                              self.get_id(), self.get_parent_id(),
-                              self.carla_actor.type_id, self.carla_actor.attributes))
+        self.relative_spawn_pose = relative_spawn_pose
+        self.synchronous_mode = synchronous_mode
+        self.queue = queue.Queue()
+        self.next_data_expected_time = None
+        self.sensor_tick_time = None
+        self.is_event_sensor = is_event_sensor
+        self._callback_active = Lock()
+        try:
+            self.sensor_tick_time = float(carla_actor.attributes["sensor_tick"])
+            node.logdebug("Sensor tick time is {}".format(self.sensor_tick_time))
+        except (KeyError, ValueError):
+            self.sensor_tick_time = None
+
+        # self._tf_broadcaster = tf2_cyber.TransformBroadcaster()
+
+    def get_cyber_transform(self, pose, timestamp):
+        if self.synchronous_mode:
+            if not self.relative_spawn_pose:
+                self.node.logwarn("{}: No relative spawn pose defined".format(self.get_prefix()))
+                return
+            pose = self.relative_spawn_pose
+            child_frame_id = self.get_prefix()
+            if self.parent is not None:
+                frame_id = self.parent.get_prefix()
+            else:
+                frame_id = "map"
+
         else:
-            self.carla_actor.listen(self._callback_sensor_data)
+            child_frame_id = self.get_prefix()
+            frame_id = "map"
+
+        transform = TransformStamped()
+
+        timestamp = cybercomp.get_timestamp(sec=timestamp, from_sec=True)
+        transform.header.timestamp_sec = float(timestamp['secs']) + float(timestamp['nsecs']) / 1000000000
+
+        transform.header.frame_id = frame_id
+        transform.child_frame_id = child_frame_id
+
+        transform.transform.translation.x = pose.position.x
+        transform.transform.translation.y = pose.position.y
+        transform.transform.translation.z = pose.position.z
+
+        transform.transform.rotation.qx = pose.orientation.qx
+        transform.transform.rotation.qy = pose.orientation.qy
+        transform.transform.rotation.qz = pose.orientation.qz
+        transform.transform.rotation.qw = pose.orientation.qw
+
+        return transform
+
+    def write_tf(self, pose, timestamp):
+        transform = self.get_cyber_transform(pose, timestamp)
+        try:
+            # self._tf_broadcaster.sendTransform(transform)
+            pass
+        except cybercomp.exceptions.CyberException:
+            if cybercomp.ok():
+                self.node.logwarn("Sensor {} failed to send transform.".format(self.uid))
+
+    def listen(self):
+        self.carla_actor.listen(self._callback_sensor_data)
 
     def destroy(self):
         """
@@ -92,40 +147,10 @@ class Sensor(Actor):
 
         :return:
         """
-        logging.debug("Destroy Sensor(id={})".format(self.get_id()))
+        self._callback_active.acquire()
         if self.carla_actor.is_listening:
             self.carla_actor.stop()
-        if self.update_lock.acquire():
-            self.current_sensor_data = None
         super(Sensor, self).destroy()
-
-    def get_frame_id(self):
-        """
-        Function (override) to get the frame id of the sensor object.
-
-        Sensor frames respect their respective parent relationship
-        within the frame name to prevent from name clashes.
-
-        :return: frame id of the sensor object
-        :rtype: string
-        """
-        return self.parent.get_frame_id() + "/" + super(Sensor, self).get_frame_id()
-
-    def get_msg_header(self, use_parent_frame=True):
-        """
-        Function (override) to get ROS message Header with sensor timestamp
-
-        :return: prefilled Header object
-        """
-        header = super(Sensor, self).get_msg_header(use_parent_frame)
-        # use timestamp of current sensor data
-        header.stamp = rospy.Time.from_sec(self.current_sensor_data.timestamp)
-        return header
-
-    def get_cyber_header(self, use_parent_frame=True):
-        header = super(sensor, self).get_cyber_header(use_parent_frame)
-        header.timestamp_sec = cyber_time.Time.now().to_sec()
-        return header
 
     def _callback_sensor_data(self, carla_sensor_data):
         """
@@ -134,49 +159,30 @@ class Sensor(Actor):
         :param carla_sensor_data: carla sensor data object
         :type carla_sensor_data: carla.SensorData
         """
-        if cyber.ok():
-            if self.update_lock.acquire(False):
-                self.current_sensor_data = carla_sensor_data
-                # self.send_tf_msg()
+        if not self._callback_active.acquire(False):
+            # if acquire fails, sensor is currently getting destroyed
+            return
+        if self.synchronous_mode:
+            if self.sensor_tick_time:
+                self.next_data_expected_time = carla_sensor_data.timestamp + \
+                    float(self.sensor_tick_time)
+            self.queue.put(carla_sensor_data)
+        else:
+            self.write_tf(trans.carla_transform_to_cyber_pose(
+                carla_sensor_data.transform), carla_sensor_data.timestamp)
+            try:
                 self.sensor_data_updated(carla_sensor_data)
-                self.update_lock.release()
-
-    def get_tf_msg(self):
-        """
-        Function (override) to create a ROS tf message of this sensor
-
-        The reported transform of the sensor is in respect to the global
-        frame.
-
-        :return: the filled tf message
-        :rtype: geometry_msgs.msg.TransformStamped
-        """
-        tf_msg = TransformStamped()
-        tf_msg.header = self.get_msg_header()
-        tf_msg.header.frame_id = "/map"
-        tf_msg.child_frame_id = self.get_frame_id()
-        tf_msg.transform = self.get_current_ros_transfrom()
-        return tf_msg
-
-    def get_current_ros_transfrom(self):
-        """
-        Function (override) to provide the current ROS transform
-
-        In general sensors are also actors, therefore they contain a transform that is updated
-        within each tick.
-        But the TF being published should exactly match the transform received by SensorData.
-
-        :return: the ROS transform of this actor
-        :rtype: geometry_msgs.msg.Transform
-        """
-        return trans.carla_transform_to_ros_transform(
-            self.current_sensor_data.transform)
+            except cybercomp.exceptions.CyberException:
+                if cybercomp.ok():
+                    self.node.logwarn(
+                        "Sensor {}: Error while executing sensor_data_updated().".format(self.uid))
+        self._callback_active.release()
 
     @abstractmethod
     def sensor_data_updated(self, carla_sensor_data):
         """
         Pure-virtual function to transform the received carla sensor data
-        into a corresponding ROS message
+        into a corresponding Cyber message
 
         :param carla_sensor_data: carla sensor data object
         :type carla_sensor_data: carla.SensorData
@@ -184,10 +190,99 @@ class Sensor(Actor):
         raise NotImplementedError(
             "This function has to be implemented by the derived classes")
 
+    def _update_synchronous_event_sensor(self, frame, timestamp):
+        while True:
+            try:
+                carla_sensor_data = self.queue.get(block=False)
+                if carla_sensor_data.frame != frame:
+                    self.node.logwarn("{}({}): Received event for frame {}"
+                                      " (expected {}). Process it anyways.".format(
+                                          self.__class__.__name__, self.get_id(),
+                                          carla_sensor_data.frame, frame))
+                self.node.logdebug("{}({}): process {}".format(
+                    self.__class__.__name__, self.get_id(), frame))
+                self.write_tf(trans.carla_transform_to_cyber_pose(
+                    carla_sensor_data.transform), timestamp)
+                self.sensor_data_updated(carla_sensor_data)
+            except queue.Empty:
+                return
 
-# these imports have to be at the end to resolve cyclic dependency
-from .camera import Camera  # noqa, pylint: disable=wrong-import-position
-from .lidar import Lidar   # noqa, pylint: disable=wrong-import-position
-from .gnss import Gnss   # noqa, pylint: disable=wrong-import-position
-from .collision_sensor import CollisionSensor   # noqa, pylint: disable=wrong-import-position
-from .lane_invasion_sensor import LaneInvasionSensor   # noqa, pylint: disable=wrong-import-position
+    def _update_synchronous_sensor(self, frame, timestamp):
+        while not self.next_data_expected_time or \
+            (not self.queue.empty() or
+             self.next_data_expected_time and
+             self.next_data_expected_time < timestamp):
+            while True:
+                try:
+                    carla_sensor_data = self.queue.get(timeout=1.0)
+                    if carla_sensor_data.frame == frame:
+                        self.node.logdebug("{}({}): process {}".format(self.__class__.__name__,
+                                                                       self.get_id(), frame))
+                        self.write_tf(trans.carla_transform_to_cyber_pose(
+                            carla_sensor_data.transform), timestamp)
+                        self.sensor_data_updated(carla_sensor_data)
+                        return
+                    elif carla_sensor_data.frame < frame:
+                        self.node.logwarn("{}({}): skipping old frame {}, expected {}".format(
+                            self.__class__.__name__,
+                            self.get_id(),
+                            carla_sensor_data.frame,
+                            frame))
+                except queue.Empty:
+                    if cybercomp.ok():
+                        self.node.logwarn("{}({}): Expected Frame {} not received".format(
+                            self.__class__.__name__, self.get_id(), frame))
+                    return
+
+    def update(self, frame, timestamp):
+        if self.synchronous_mode:
+            if self.is_event_sensor:
+                self._update_synchronous_event_sensor(frame, timestamp)
+            else:
+                self._update_synchronous_sensor(frame, timestamp)
+
+        super(Sensor, self).update(frame, timestamp)
+
+
+# http://docs.cyber.org/indigo/api/sensor_msgs/html/point__cloud2_8py_source.html
+
+def _get_struct_fmt(is_bigendian, fields, field_names=None):
+    fmt = '>' if is_bigendian else '<'
+
+    offset = 0
+    for field in (f for f in sorted(fields, key=lambda f: f.offset)
+                  if field_names is None or f.name in field_names):
+        if offset < field.offset:
+            fmt += 'x' * (field.offset - offset)
+            offset = field.offset
+        if field.datatype not in _DATATYPES:
+            print('Skipping unknown PointField datatype [{}]' % field.datatype, file=sys.stderr)
+        else:
+            datatype_fmt, datatype_length = _DATATYPES[field.datatype]
+            fmt += field.count * datatype_fmt
+            offset += field.count * datatype_length
+
+    return fmt
+
+
+def create_cloud(header, points):
+    """
+    Create a L{PointCloud} message.
+    @param header: The point cloud header.
+    @type  header: L{std_msgs.msg.Header}
+    @param fields: The point cloud fields.
+    @type  fields: iterable of L{sensor_msgs.msg.PointField}
+    @param points: The point cloud points.
+    @type  points: list of iterables, i.e. one iterable for each point, with the
+                   elements of each iterable being the values of the fields for
+                   that point (in the same order as the fields parameter)
+    @return: The point cloud.
+    @rtype:  L{PointCloud}
+    """
+
+    return PointCloud(header=header,
+                      frame_id=header.frame_id,
+                      is_dense=False,
+                      point=points,
+                      width=len(points),
+                      height=1)

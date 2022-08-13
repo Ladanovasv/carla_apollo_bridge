@@ -10,7 +10,14 @@
 Classes to handle Carla gnsss
 """
 
-from .sensor import Sensor
+import carla_common.transforms as trans
+
+from carla_cyber_bridge.sensor import Sensor
+
+from modules.drivers.gnss.proto.gnss_best_pose_pb2 import GnssBestPose
+from modules.drivers.gnss.proto.gnss_status_pb2 import GnssStatus
+from modules.drivers.gnss.proto.heading_pb2 import Heading
+from modules.localization.proto.gps_pb2 import Gps
 
 
 class Gnss(Sensor):
@@ -19,39 +26,90 @@ class Gnss(Sensor):
     Actor implementation details for gnss sensor
     """
 
-    def __init__(self, carla_actor, parent, topic_prefix=None, append_role_name_topic_postfix=True):
+    def __init__(self, uid, name, parent, relative_spawn_pose, node, carla_actor, synchronous_mode):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param relative_spawn_pose: the relative spawn pose of this
+        :type relative_spawn_pose: geometry_msgs.Pose
+        :param node: node-handle
+        :type node: CompatibleNode
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
-        :param append_role_name_topic_postfix: if this flag is set True,
-            the role_name of the actor is used as topic postfix
-        :type append_role_name_topic_postfix: boolean
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
         """
-        if topic_prefix is None:
-            topic_prefix = 'gnss'
-        super(Gnss, self).__init__(carla_actor=carla_actor,
+        super(Gnss, self).__init__(uid=uid,
+                                   name=name,
                                    parent=parent,
-                                   topic_prefix=topic_prefix,
-                                   append_role_name_topic_postfix=append_role_name_topic_postfix)
+                                   relative_spawn_pose=relative_spawn_pose,
+                                   node=node,
+                                   carla_actor=carla_actor,
+                                   synchronous_mode=synchronous_mode)
 
-    def sensor_data_updated(self, carla_gnss_event):
+        self.gnss_navsatfix_writer = node.new_writer(self.get_topic_prefix() + "/best_pose",
+                                           GnssBestPose,
+                                           qos_depth=10)
+        self.gnss_odometry_writer = node.new_writer(self.get_topic_prefix() + "/odometry",
+                                           Gps,
+                                           qos_depth=10)
+        self.gnss_heading_writer = node.new_writer(self.get_topic_prefix() + "/heading",
+                                           Heading,
+                                           qos_depth=10)
+        self.gnss_status_writer = node.new_writer(self.get_topic_prefix() + "/gnss_status",
+                                           GnssStatus,
+                                           qos_depth=10)
+        self.listen()
+
+    def destroy(self):
+        super(Gnss, self).destroy()
+
+    def get_topic_prefix(self):
+        """
+        get the topic name of the current entity.
+
+        :return: the final topic name of this object
+        :rtype: string
+        """
+        return "/apollo/sensor/" + self.name
+
+    def sensor_data_updated(self, carla_gnss_measurement):
         """
         Function to transform a received gnss event into a ROS NavSatFix message
 
-        :param carla_gnss_event: carla gnss event object
-        :type carla_gnss_event: carla.GnssEvent
+        :param carla_gnss_measurement: carla gnss measurement object
+        :type carla_gnss_measurement: carla.GnssMeasurement
         """
-        pass
-        # navsatfix_msg = NavSatFix()
-        # navsatfix_msg.header = self.get_msg_header(use_parent_frame=False)
-        # navsatfix_msg.latitude = carla_gnss_event.latitude
-        # navsatfix_msg.longitude = carla_gnss_event.longitude
-        # navsatfix_msg.altitude = carla_gnss_event.altitude
-        # self.publish_ros_message(
-        #     self.topic_name() + "/fix", navsatfix_msg)
+        gnss_navsatfix_msg = GnssBestPose()
+        gnss_navsatfix_msg.header.CopyFrom(self.get_msg_header(timestamp=carla_gnss_measurement.timestamp))
+        gnss_navsatfix_msg.latitude = carla_gnss_measurement.latitude
+        gnss_navsatfix_msg.longitude = carla_gnss_measurement.longitude
+        gnss_navsatfix_msg.height_msl = carla_gnss_measurement.altitude
+        self.gnss_navsatfix_writer.write(gnss_navsatfix_msg)
+
+        gnss_odometry_msg = Gps()
+        gnss_odometry_msg.header.CopyFrom(self.get_msg_header(timestamp=carla_gnss_measurement.timestamp))
+        gnss_odometry_msg.localization.CopyFrom(self.parent.get_current_cyber_pose())
+        self.gnss_odometry_writer.write(gnss_odometry_msg)
+
+        gnss_heading_msg = Heading()
+        gnss_heading_msg.header.CopyFrom(self.get_msg_header(timestamp=carla_gnss_measurement.timestamp))
+        gnss_heading_msg.measurement_time = self.node.get_time()
+        roll, pitch, yaw = trans.carla_rotation_to_RPY(self.carla_actor.get_transform().rotation)
+        gnss_heading_msg.heading = yaw
+        self.gnss_odometry_writer.write(gnss_heading_msg)
+
+        gnss_status_msg = GnssStatus()
+        gnss_status_msg.header.timestamp_sec = carla_gnss_measurement.timestamp
+        gnss_status_msg.header.module_name = "gnss"
+        gnss_status_msg.solution_completed = True
+        gnss_status_msg.solution_status = 0
+        gnss_status_msg.position_type = 56
+        gnss_status_msg.num_sats = 3
+        self.gnss_status_writer.write(gnss_status_msg)

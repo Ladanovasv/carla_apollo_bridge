@@ -10,9 +10,9 @@
 Classes to handle lane invasion events
 """
 
-import logging
+from carla_cyber_bridge.sensor import Sensor
 
-from .sensor import Sensor
+# from carla_msgs.msg import CarlaLaneInvasionEvent
 
 
 class LaneInvasionSensor(Sensor):
@@ -21,24 +21,41 @@ class LaneInvasionSensor(Sensor):
     Actor implementation details for a lane invasion sensor
     """
 
-    def __init__(self, carla_actor, parent, topic_prefix=None, append_role_name_topic_postfix=True):
+    def __init__(self, uid, name, parent, relative_spawn_pose, node, carla_actor, synchronous_mode):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param relative_spawn_pose: the spawn pose of this
+        :type relative_spawn_pose: geometry_msgs.Pose
+        :param node: node-handle
+        :type node: CompatibleNode
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
-        :param append_role_name_topic_postfix: if this flag is set True,
-            the role_name of the actor is used as topic postfix
-        :type append_role_name_topic_postfix: boolean
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
         """
-        super(LaneInvasionSensor, self).__init__(carla_actor=carla_actor,
+        super(LaneInvasionSensor, self).__init__(uid=uid,
+                                                 name=name,
                                                  parent=parent,
-                                                 topic_prefix="lane_invasion",
-                                                 append_role_name_topic_postfix=False)
+                                                 relative_spawn_pose=relative_spawn_pose,
+                                                 node=node,
+                                                 carla_actor=carla_actor,
+                                                 synchronous_mode=synchronous_mode,
+                                                 is_event_sensor=True)
+
+        # self.lane_invasion_writer = node.new_writer(self.get_topic_prefix(),
+        #                                             CarlaLaneInvasionEvent,
+        #                                             qos_depth=10)
+        # self.listen()
+
+    def destroy(self):
+        super(LaneInvasionSensor, self).destroy()
 
     def sensor_data_updated(self, lane_invasion_event):
         """
@@ -47,10 +64,9 @@ class LaneInvasionSensor(Sensor):
         :param lane_invasion_event: carla lane invasion event object
         :type lane_invasion_event: carla.LaneInvasionEvent
         """
-        logging.warning('lane invasion message not yet implemented in cyber')
+        pass
         # lane_invasion_msg = CarlaLaneInvasionEvent()
-        # lane_invasion_msg.header = self.get_msg_header(use_parent_frame=False)
+        # lane_invasion_msg.header = self.get_msg_header(timestamp=lane_invasion_event.timestamp)
         # for marking in lane_invasion_event.crossed_lane_markings:
         #     lane_invasion_msg.crossed_lane_markings.append(marking.type)
-        # self.publish_ros_message(
-        #     self.topic_name(), lane_invasion_msg)
+        # self.lane_invasion_writer.write(lane_invasion_msg)

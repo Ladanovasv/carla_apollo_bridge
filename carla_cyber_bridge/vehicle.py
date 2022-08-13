@@ -9,98 +9,56 @@
 """
 Classes to handle Carla vehicles
 """
-import logging
 
+import carla_common.transforms as trans
+
+from carla_cyber_bridge.traffic_participant import TrafficParticipant
+
+from cyber.carla_bridge.carla_proto.proto.carla_marker_pb2 import ColorRGBA
 from modules.perception.proto.perception_obstacle_pb2 import PerceptionObstacle
 
-from .actor import Actor
-import transforms as transforms
 
-
-class Vehicle(Actor):
+class Vehicle(TrafficParticipant):
 
     """
     Actor implementation details for vehicles
     """
 
-    @staticmethod
-    def create_actor(carla_actor, parent):
-        """
-        Static factory method to create vehicle actors
-
-        :param carla_actor: carla vehicle actor object
-        :type carla_actor: carla.Vehicle
-        :param parent: the parent of the new traffic actor
-        :type parent: carla_ros_bridge.Parent
-        :return: the created vehicle actor
-        :rtype: carla_ros_bridge.Vehicle or derived type
-        """
-        return Vehicle(carla_actor=carla_actor, parent=parent)
-
-    def __init__(self, carla_actor, parent, topic_prefix=None, append_role_name_topic_postfix=True):
+    def __init__(self, uid, name, parent, node, carla_actor):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param node: node-handle
+        :type node: carla_cyber_bridge.CarlaCyberBridge
         :param carla_actor: carla vehicle actor object
         :type carla_actor: carla.Vehicle
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
-        :param append_role_name_topic_postfix: if this flag is set True,
-            the role_name of the actor is used as topic postfix
-        :type append_role_name_topic_postfix: boolean
         """
-        if topic_prefix is None:
-            topic_prefix = "vehicle/{:03}".format(
-                Actor.global_id_registry.get_id(carla_actor.id))
+        self.classification = PerceptionObstacle.VEHICLE
+        if 'object_type' in carla_actor.attributes:
+            if carla_actor.attributes['object_type'] == 'car':
+                self.classification = PerceptionObstacle.VEHICLE
+            elif carla_actor.attributes['object_type'] == 'bike':
+                self.classification = PerceptionObstacle.BICYCLE
+            elif carla_actor.attributes['object_type'] == 'motorcycle':
+                self.classification = PerceptionObstacle.BICYCLE
+            elif carla_actor.attributes['object_type'] == 'truck':
+                self.classification = PerceptionObstacle.VEHICLE
+            elif carla_actor.attributes['object_type'] == 'other':
+                self.classification = PerceptionObstacle.UNKNOWN_MOVABLE
 
-        super(Vehicle, self).__init__(carla_actor=carla_actor,
+        super(Vehicle, self).__init__(uid=uid,
+                                      name=name,
                                       parent=parent,
-                                      topic_prefix=topic_prefix,
-                                      append_role_name_topic_postfix=append_role_name_topic_postfix)
+                                      node=node,
+                                      carla_actor=carla_actor)
 
-        # self.classification = Object.CLASSIFICATION_UNKNOWN
-        # if carla_actor.attributes.has_key('object_type'):
-        #     if carla_actor.attributes['object_type'] == 'car':
-        #         self.classification = Object.CLASSIFICATION_CAR
-        #     elif carla_actor.attributes['object_type'] == 'bike':
-        #         self.classification = Object.CLASSIFICATION_BIKE
-        #     elif carla_actor.attributes['object_type'] == 'motorcycle':
-        #         self.classification = Object.CLASSIFICATION_MOTORCYCLE
-        #     elif carla_actor.attributes['object_type'] == 'truck':
-        #         self.classification = Object.CLASSIFICATION_TRUCK
-        #     elif carla_actor.attributes['object_type'] == 'other':
-        #         self.classification = Object.CLASSIFICATION_OTHER_VEHICLE
-        # self.classification_age = 0
-
-    def destroy(self):
-        """
-        Function (override) to destroy this object.
-
-        Finally forward call to super class.
-
-        :return:
-        """
-        logging.debug("Destroy Vehicle(id={})".format(self.get_id()))
-        super(Vehicle, self).destroy()
-
-    def update(self):
-        """
-        Function (override) to update this object.
-
-        On update vehicles send:
-        - tf global frame
-        - object message
-        - marker message
-
-        :return:
-        """
-        # self.send_tf_msg()
-        # self.send_marker_msg()
-        super(Vehicle, self).update()
-
-    def get_marker_color(self):
+    def get_marker_color(self):  # pylint: disable=no-self-use
         """
         Function (override) to return the color for marker messages.
 
@@ -108,66 +66,27 @@ class Vehicle(Actor):
         :rtpye : std_msgs.msg.ColorRGBA
         """
         color = ColorRGBA()
-        color.r = 255
-        color.g = 0
-        color.b = 0
+        color.r = 255.0
+        color.g = 0.0
+        color.b = 0.0
         return color
 
-    def send_marker_msg(self):
+    def get_marker_pose(self):
         """
-        Function to send marker messages of this vehicle.
+        Function to return the pose for vehicles.
 
+        :return: the pose of the vehicle
+        :rtype: geometry_msgs.msg.Pose
+        """
+        # Moving pivot point from the bottom (CARLA) to the center (ROS) of the bounding box.
+        extent = self.carla_actor.bounding_box.extent
+        marker_transform = self.carla_actor.get_transform()
+        marker_transform.location -= marker_transform.get_up_vector() * extent.z
+        return trans.carla_transform_to_cyber_pose(marker_transform)
+
+    def get_classification(self):
+        """
+        Function (override) to get classification
         :return:
         """
-        if not self.parent.get_param("challenge_mode"):
-            marker = self.get_marker(use_parent_frame=False)
-            marker.type = Marker.CUBE
-
-            marker.pose = transforms.carla_location_to_pose(
-                self.carla_actor.bounding_box.location)
-            marker.scale.x = self.carla_actor.bounding_box.extent.x * 2.0
-            marker.scale.y = self.carla_actor.bounding_box.extent.y * 2.0
-            marker.scale.z = self.carla_actor.bounding_box.extent.z * 2.0
-            self.publish_ros_message('/carla/vehicle_marker', marker)
-
-    def get_ros_object_msg(self):
-        """
-        Function to send object messages of this vehicle.
-
-        A derived_object_msgs.msg.Object is prepared to be published via '/carla/objects'
-
-        :return:
-        """
-        vehicle_object = Object(header=self.get_msg_header())
-        # ID
-        vehicle_object.id = self.get_global_id()
-        # Pose
-        vehicle_object.pose = self.get_current_ros_pose()
-        # Twist
-        vehicle_object.twist = self.get_current_ros_twist()
-        # Acceleration
-        vehicle_object.accel = self.get_current_ros_accel()
-        # Shape
-        vehicle_object.shape.type = SolidPrimitive.BOX
-        vehicle_object.shape.dimensions.extend([
-            self.carla_actor.bounding_box.extent.x * 2.0,
-            self.carla_actor.bounding_box.extent.y * 2.0,
-            self.carla_actor.bounding_box.extent.z * 2.0])
-
-        # Classification if available in attributes
-        if self.classification != Object.CLASSIFICATION_UNKNOWN:
-            vehicle_object.object_classified = True
-            vehicle_object.classification = self.classification
-            vehicle_object.classification_certainty = 1.0
-            self.classification_age += 1
-            vehicle_object.classification_age = self.classification_age
-
-        return vehicle_object
-
-    def get_cyber_obstacle_msg(self):
-        obstacle = super(Vehicle, self).get_cyber_obstacle_msg()
-        if self.carla_actor.attributes["number_of_wheels"] == "2":
-            obstacle.type = PerceptionObstacle.Type.BICYCLE
-        else:
-            obstacle.type = PerceptionObstacle.Type.VEHICLE
-        return obstacle
+        return self.classification

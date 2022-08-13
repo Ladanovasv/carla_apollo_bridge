@@ -9,19 +9,22 @@
 """
 Class to handle Carla camera sensors
 """
-import logging
-from abc import abstractmethod
 
 import math
-import numpy
-
-import cv2
-from modules.drivers.proto.sensor_image_pb2 import CompressedImage
-from modules.drivers.proto.pointcloud_pb2 import PointXYZIT, PointCloud
+import os
+from abc import abstractmethod
 
 import carla
-from .sensor import Sensor
-import transforms as trans
+import numpy
+import transforms3d
+import cv2
+
+import carla_common.transforms as trans
+from carla_cyber_bridge.sensor import Sensor, create_cloud
+
+from cyber.carla_bridge.carla_proto.proto.carla_camera_info_pb2 import CameraInfo
+from modules.drivers.proto.sensor_image_pb2 import Image, CompressedImage
+from modules.drivers.proto.pointcloud_pb2 import PointXYZIT, PointCloud
 
 
 class Camera(Sensor):
@@ -30,49 +33,61 @@ class Camera(Sensor):
     Sensor implementation details for cameras
     """
 
-    @staticmethod
-    def create_actor(carla_actor, parent):
-        """
-        Static factory method to create camera actors
-
-        :param carla_actor: carla camera actor object
-        :type carla_actor: carla.Camera
-        :param parent: the parent of the new traffic actor
-        :type parent: carla_ros_bridge.Parent
-        :return: the created camera actor
-        :rtype: carla_ros_bridge.Camera or derived type
-        """
-        if carla_actor.type_id.startswith("sensor.camera.rgb"):
-            return RgbCamera(carla_actor=carla_actor, parent=parent)
-        elif carla_actor.type_id.startswith("sensor.camera.depth"):
-            return DepthCamera(carla_actor=carla_actor, parent=parent)
-        elif carla_actor.type_id.startswith("sensor.camera.semantic_segmentation"):
-            return SemanticSegmentationCamera(carla_actor=carla_actor, parent=parent)
-        else:
-            return Camera(carla_actor=carla_actor, parent=parent)
-
-    def __init__(self, carla_actor, parent, topic_prefix=None):
+    def __init__(self, uid, name, parent, relative_spawn_pose, node, carla_actor, synchronous_mode, is_event_sensor=False):  # pylint: disable=too-many-arguments
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param node: node-handle
+        :type node: CompatibleNode
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
         """
-        if topic_prefix is None:
-            topic_prefix = 'camera'
-        super(Camera, self).__init__(carla_actor=carla_actor,
+        super(Camera, self).__init__(uid=uid,
+                                     name=name,
                                      parent=parent,
-                                     topic_prefix=topic_prefix)
+                                     relative_spawn_pose=relative_spawn_pose,
+                                     node=node,
+                                     carla_actor=carla_actor,
+                                     synchronous_mode=synchronous_mode,
+                                     is_event_sensor=is_event_sensor)
 
         if self.__class__.__name__ == "Camera":
-            logging.warning("Created Unsupported Camera Actor"
-                          "(id={}, parent_id={}, type={}, attributes={})".format(
-                              self.get_id(), self.get_parent_id(),
-                              self.carla_actor.type_id, self.carla_actor.attributes))
+            self.node.logwarn("Created Unsupported Camera Actor"
+                              "(id={}, type={}, attributes={})".format(self.get_id(),
+                                                                       self.carla_actor.type_id,
+                                                                       self.carla_actor.attributes))
+        else:
+            self._build_camera_info()
+
+        self.camera_info_writer = node.new_writer(self.get_topic_prefix() + "/camera_info",
+                                                  CameraInfo,
+                                                  qos_depth=10)
+        self.camera_image_writer = node.new_writer(self.get_topic_prefix() + "/image",
+                                                   Image,
+                                                   qos_depth=10)
+        self.camera_compressed_image_writer = node.new_writer(self.get_topic_prefix() + "/image/compressed",
+                                                              CompressedImage,
+                                                              qos_depth=10)
+
+    def destroy(self):
+        super(Camera, self).destroy()
+
+    def get_topic_prefix(self):
+        """
+        get the topic name of the current entity.
+
+        :return: the final topic name of this object
+        :rtype: string
+        """
+        return "/apollo/sensor/camera/" + self.name
 
     def _build_camera_info(self):
         """
@@ -82,7 +97,7 @@ class Camera(Sensor):
         """
         camera_info = CameraInfo()
         # store info without header
-        camera_info.header = None
+        camera_info.header.CopyFrom(self.get_msg_header())
         camera_info.width = int(self.carla_actor.attributes['image_size_x'])
         camera_info.height = int(self.carla_actor.attributes['image_size_y'])
         camera_info.distortion_model = 'plumb_bob'
@@ -91,82 +106,89 @@ class Camera(Sensor):
         fx = camera_info.width / (
             2.0 * math.tan(float(self.carla_actor.attributes['fov']) * math.pi / 360.0))
         fy = fx
-        camera_info.K = [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-        camera_info.D = [0, 0, 0, 0, 0]
-        camera_info.R = [1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0]
-        camera_info.P = [fx, 0, cx, 0, 0, fy, cy, 0, 0, 0, 1.0, 0]
+        camera_info.K.extend([fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0])
+        camera_info.D.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+        camera_info.R.extend([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+        camera_info.P.extend([fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0])
         self._camera_info = camera_info
 
-    def sensor_data_updated(self, carla_image):
+    # pylint: disable=arguments-differ
+    def sensor_data_updated(self, carla_camera_data):
         """
-        Function (override) to transform the received carla image data
+        Function (override) to transform the received carla camera data
         into a ROS image message
-
-        :param carla_image: carla image object
-        :type carla_image: carla.Image
         """
-        if ((carla_image.height != int(self.carla_actor.attributes['image_size_y'])) or
-                (carla_image.width != int(self.carla_actor.attributes['image_size_x']))):
-            logging.error(
-                "Camera{} received image not matching configuration".format(self.topic_name()))
+        image_data_array = self.get_image_data_array(carla_camera_data)
 
-        image_data_array, encoding = self.get_carla_image_data_array(
-            carla_image=carla_image)
+        cam_info = self._camera_info
+        cam_info.header.CopyFrom(self.parent.get_msg_header())
+        self.camera_info_writer.write(cam_info)
 
-        cyber_img = CompressedImage()
-        cyber_img.header.CopyFrom(self.parent.get_cyber_header())
-        cyber_img.header.frame_id = self.carla_actor.attributes['role_name']
-        cyber_img.frame_id = cyber_img.header.frame_id
-        cyber_img.format = 'jpeg'
-        cyber_img.measurement_time = cyber_img.header.timestamp_sec
-        cyber_img.data = cv2.imencode('.jpg', image_data_array)[1].tostring()
-        self.write_cyber_message('/apollo/sensor/camera/%s/image/compressed' % self.carla_actor.attributes['role_name'], cyber_img)
+        cam_img = Image()
+        cam_img.header.CopyFrom(self.parent.get_msg_header())
+        cam_img.header.frame_id = self.carla_actor.attributes['role_name']
+        cam_img.frame_id = cam_img.header.frame_id
+        cam_img.measurement_time = cam_img.header.timestamp_sec
+        cam_img.height = image_data_array.shape[0]
+        cam_img.width = image_data_array.shape[1]
+        cam_img.encoding = 'BAYER_RGGB8'
+        cam_img.data = cv2.imencode('.jpg', image_data_array)[1].tostring()
+        self.camera_image_writer.write(cam_img)
 
-    def get_tf_msg(self):
+        cam_compressed_img = CompressedImage()
+        cam_compressed_img.header.CopyFrom(self.parent.get_msg_header())
+        cam_compressed_img.header.frame_id = self.carla_actor.attributes['role_name']
+        cam_compressed_img.frame_id = cam_img.header.frame_id
+        cam_compressed_img.format = 'jpeg'
+        cam_compressed_img.measurement_time = cam_img.header.timestamp_sec
+        cam_compressed_img.data = cv2.imencode('.jpg', image_data_array)[1].tostring()
+        self.camera_compressed_image_writer.write(cam_compressed_img)
+
+    def get_cyber_transform(self, pose, timestamp):
         """
         Function (override) to modify the tf messages sent by this camera.
-
         The camera transformation has to be altered to look at the same axis
         as the opencv projection in order to get easy depth cloud for RGBD camera
-
         :return: the filled tf message
         :rtype: geometry_msgs.msg.TransformStamped
         """
-        tf_msg = super(Camera, self).get_tf_msg()
+        tf_msg = super(Camera, self).get_cyber_transform(pose, timestamp)
         rotation = tf_msg.transform.rotation
-        quat = [rotation.x, rotation.y, rotation.z, rotation.w]
-        quat_swap = tf.transformations.quaternion_from_matrix(
-            [[0, 0, 1, 0],
-             [-1, 0, 0, 0],
-             [0, -1, 0, 0],
-             [0, 0, 0, 1]])
-        quat = tf.transformations.quaternion_multiply(quat, quat_swap)
 
-        tf_msg.transform.rotation = trans.numpy_quaternion_to_ros_quaternion(
-            quat)
+        quat = [rotation.qw, rotation.qx, rotation.qy, rotation.qz]
+        quat_swap = transforms3d.quaternions.mat2quat(numpy.matrix(
+            [[0, 0, 1],
+             [-1, 0, 0],
+             [0, -1, 0]]))
+        quat = transforms3d.quaternions.qmult(quat, quat_swap)
+
+        tf_msg.transform.rotation.qw = quat[0]
+        tf_msg.transform.rotation.qx = quat[1]
+        tf_msg.transform.rotation.qy = quat[2]
+        tf_msg.transform.rotation.qz = quat[3]
+
         return tf_msg
 
-    @abstractmethod
-    def get_carla_image_data_array(self, carla_image):
+    def get_image_data_array(self, carla_camera_data):
         """
-        Virtual function to convert the carla image to a numpy data array
-        as input for the cv_bridge.cv2_to_imgmsg() function
+        Function to transform the received carla camera data into a ROS image message
+        """
+        if ((carla_camera_data.height != self._camera_info.height) or
+                (carla_camera_data.width != self._camera_info.width)):
+            self.node.logerr(
+                "Camera{} received image not matching configuration".format(self.get_prefix()))
+        image_data_array, encoding = self.get_carla_image_data_array(
+            carla_camera_data)
 
-        :param carla_image: carla image object
-        :type carla_image: carla.Image
+        return image_data_array
+
+    @abstractmethod
+    def get_carla_image_data_array(self, carla_camera_data):
+        """
+        Virtual function to convert the carla camera data to a numpy data array
+
         :return tuple (numpy data array containing the image information, encoding)
         :rtype tuple(numpy.ndarray, string)
-        """
-        raise NotImplementedError(
-            "This function has to be re-implemented by derived classes")
-
-    @abstractmethod
-    def get_image_topic_name(self):
-        """
-        Virtual function to provide the actual image topic name
-
-        :return image topic name
-        :rtype string
         """
         raise NotImplementedError(
             "This function has to be re-implemented by derived classes")
@@ -178,27 +200,38 @@ class RgbCamera(Camera):
     Camera implementation details for rgb camera
     """
 
-    def __init__(self, carla_actor, parent, topic_prefix=None):
+    def __init__(self, uid, name, parent, relative_spawn_pose, node, carla_actor, synchronous_mode):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param relative_spawn_pose: the relative spawn pose of this
+        :type relative_spawn_pose: geometry_msgs.Pose
+        :param node: node-handle
+        :type node: CompatibleNode
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
         """
-        if topic_prefix is None:
-            topic_prefix = 'camera/rgb'
-        super(RgbCamera, self).__init__(carla_actor=carla_actor,
+        super(RgbCamera, self).__init__(uid=uid,
+                                        name=name,
                                         parent=parent,
-                                        topic_prefix=topic_prefix)
+                                        relative_spawn_pose=relative_spawn_pose,
+                                        node=node,
+                                        carla_actor=carla_actor,
+                                        synchronous_mode=synchronous_mode)
+
+        self.listen()
 
     def get_carla_image_data_array(self, carla_image):
         """
         Function (override) to convert the carla image to a numpy data array
-        as input for the cv_bridge.cv2_to_imgmsg() function
 
         The RGB camera provides a 4-channel int8 color format (bgra).
 
@@ -214,15 +247,6 @@ class RgbCamera(Camera):
 
         return carla_image_data_array, 'bgra8'
 
-    def get_image_topic_name(self):
-        """
-        virtual function to provide the actual image topic name
-
-        :return image topic name
-        :rtype string
-        """
-        return "image_color"
-
 
 class DepthCamera(Camera):
 
@@ -230,54 +254,38 @@ class DepthCamera(Camera):
     Camera implementation details for depth camera
     """
 
-    def __init__(self, carla_actor, parent, topic_prefix=None):
+    def __init__(self, uid, name, parent, relative_spawn_pose, node, carla_actor, synchronous_mode):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param relative_spawn_pose: the relative spawn pose of this
+        :type relative_spawn_pose: geometry_msgs.Pose
+        :param node: node-handle
+        :type node: CompatibleNode
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
         """
-        if topic_prefix is None:
-            topic_prefix = 'camera/depth'
-        super(DepthCamera, self).__init__(carla_actor=carla_actor,
+        super(DepthCamera, self).__init__(uid=uid,
+                                          name=name,
                                           parent=parent,
-                                          topic_prefix=topic_prefix)
+                                          relative_spawn_pose=relative_spawn_pose,
+                                          node=node,
+                                          carla_actor=carla_actor,
+                                          synchronous_mode=synchronous_mode)
 
-    def sensor_data_updated(self, carla_image):
-        image_data_array, encoding = self.get_carla_image_data_array(
-                carla_image=carla_image)
-        x = len(image_data_array[0]) / 2.0
-        y = len(image_data_array) / 2.0
-
-        # add noise to the range values from the image
-        image_data_array += numpy.random.normal(0, .050, image_data_array.shape)
-
-        msg = PointCloud()
-        msg.header.CopyFrom(self.parent.get_cyber_header())
-        msg.header.frame_id = self.carla_actor.attributes['role_name']
-        msg.frame_id = msg.header.frame_id
-        msg.measurement_time = msg.header.timestamp_sec
-        w = float(carla_image.width)
-        h_fov = float(carla_image.fov) * numpy.pi / 180.0
-        f = w / 2.0 / numpy.tan(h_fov / 2.0)
-        for u in range(len(image_data_array[0])):
-            for v in range(len(image_data_array)):
-                point = PointXYZIT()
-                point.x = image_data_array[v][u]
-                point.y = -(u - x) * point.x / f
-                point.z = -(v - y) * point.x / f
-                msg.point.append(point)
-
-        self.write_cyber_message('/apollo/sensor/%s/compensator/PointCloud2' % msg.frame_id, msg)
+        self.listen()
 
     def get_carla_image_data_array(self, carla_image):
         """
         Function (override) to convert the carla image to a numpy data array
-        as input for the cv_bridge.cv2_to_imgmsg() function
 
         The depth camera raw image is converted to a linear depth image
         having 1-channel float32.
@@ -315,15 +323,6 @@ class DepthCamera(Camera):
         # which is automatically selected by cv bridge with passthrough
         return depth_image, 'passthrough'
 
-    def get_image_topic_name(self):
-        """
-        Function (override) to provide the actual image topic name
-
-        :return image topic name
-        :rtype string
-        """
-        return "image_depth"
-
 
 class SemanticSegmentationCamera(Camera):
 
@@ -331,28 +330,39 @@ class SemanticSegmentationCamera(Camera):
     Camera implementation details for segmentation camera
     """
 
-    def __init__(self, carla_actor, parent, topic_prefix=None):
+    def __init__(self, uid, name, parent, relative_spawn_pose, node, carla_actor, synchronous_mode):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param relative_spawn_pose: the relative spawn pose of this
+        :type relative_spawn_pose: geometry_msgs.Pose
+        :param node: node-handle
+        :type node: CompatibleNode
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
         """
-        if topic_prefix is None:
-            topic_prefix = 'camera/semantic_segmentation'
         super(
-            SemanticSegmentationCamera, self).__init__(carla_actor=carla_actor,
+            SemanticSegmentationCamera, self).__init__(uid=uid,
+                                                       name=name,
                                                        parent=parent,
-                                                       topic_prefix=topic_prefix)
+                                                       relative_spawn_pose=relative_spawn_pose,
+                                                       node=node,
+                                                       synchronous_mode=synchronous_mode,
+                                                       carla_actor=carla_actor)
+
+        # self.listen()
 
     def get_carla_image_data_array(self, carla_image):
         """
         Function (override) to convert the carla image to a numpy data array
-        as input for the cv_bridge.cv2_to_imgmsg() function
 
         The segmentation camera raw image is converted to the city scapes palette image
         having 4-channel uint8.
@@ -369,11 +379,94 @@ class SemanticSegmentationCamera(Camera):
             dtype=numpy.uint8, buffer=carla_image.raw_data)
         return carla_image_data_array, 'bgra8'
 
-    def get_image_topic_name(self):
-        """
-        Function (override) to provide the actual image topic name
 
-        :return image topic name
-        :rtype string
+class DVSCamera(Camera):
+
+    """
+    Sensor implementation details for dvs cameras
+    """
+
+    def __init__(self, uid, name, parent, relative_spawn_pose, node, carla_actor, synchronous_mode):  # pylint: disable=too-many-arguments
         """
-        return "image_segmentation"
+        Constructor
+
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param relative_spawn_pose: the relative spawn pose of this
+        :type relative_spawn_pose: geometry_msgs.Pose
+        :param node: node-handle
+        :type node: CompatibleNode
+        :param carla_actor: carla actor object
+        :type carla_actor: carla.Actor
+        :param synchronous_mode: use in synchronous mode?
+        :type synchronous_mode: bool
+        """
+        super(DVSCamera, self).__init__(uid=uid,
+                                        name=name,
+                                        parent=parent,
+                                        relative_spawn_pose=relative_spawn_pose,
+                                        node=node,
+                                        carla_actor=carla_actor,
+                                        synchronous_mode=synchronous_mode,
+                                        is_event_sensor=True)
+
+        self._dvs_events = None
+        self.dvs_camera_writer = node.new_writer(self.get_topic_prefix() + '/events',
+                                                 PointCloud,
+                                                 qos_depth=10)
+
+        # self.listen()
+
+    def destroy(self):
+        super(DVSCamera, self).destroy()
+
+    def sensor_data_updated(self, carla_dvs_event_array):
+        """
+        Function to transform the received DVS event array into a ROS message
+
+        :param carla_dvs_event_array: dvs event array object
+        :type carla_image: carla.DVSEventArray
+        """
+        super(DVSCamera, self).sensor_data_updated(carla_dvs_event_array)
+
+        header = self.get_msg_header(timestamp=carla_dvs_event_array.timestamp)
+        fields = [
+            PointField(name='x', offset=0, datatype=PointField.UINT16, count=1),
+            PointField(name='y', offset=2, datatype=PointField.UINT16, count=1),
+            PointField(name='t', offset=4, datatype=PointField.FLOAT64, count=1),
+            PointField(name='pol', offset=12, datatype=PointField.INT8, count=1)
+        ]
+
+        dvs_events_msg = create_cloud(header, fields, self._dvs_events.tolist())
+        # self.dvs_camera_writer.write(dvs_events_msg)
+
+    def get_carla_image_data_array(self, carla_dvs_event_array):
+        """
+        Function (override) to convert the carla dvs event array to a numpy data array
+
+        The carla.DVSEventArray is converted into a 3-channel int8 color image format (bgr).
+
+        :param carla_dvs_event_array: dvs event array object
+        :type carla_dvs_event_array: carla.DVSEventArray
+        :return tuple (numpy data array containing the image information, encoding)
+        :rtype tuple(numpy.ndarray, string)
+        """
+        self._dvs_events = numpy.frombuffer(carla_dvs_event_array.raw_data,
+                                            dtype=numpy.dtype([
+                                                ('x', numpy.uint16),
+                                                ('y', numpy.uint16),
+                                                ('t', numpy.int64),
+                                                ('pol', numpy.bool)
+                                            ]))
+        carla_image_data_array = numpy.zeros(
+            (carla_dvs_event_array.height, carla_dvs_event_array.width, 3),
+            dtype=numpy.uint8)
+        # Blue is positive, red is negative
+        carla_image_data_array[self._dvs_events[:]['y'], self._dvs_events[:]['x'],
+                               self._dvs_events[:]['pol'] * 2] = 255
+
+        return carla_image_data_array, 'bgr8'

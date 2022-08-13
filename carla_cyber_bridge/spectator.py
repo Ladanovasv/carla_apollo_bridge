@@ -10,7 +10,7 @@
 Classes to handle Carla spectator
 """
 
-from .actor import Actor
+from carla_cyber_bridge.actor import Actor
 
 
 class Spectator(Actor):
@@ -19,23 +19,23 @@ class Spectator(Actor):
     Actor implementation details for spectators
     """
 
-    def __init__(self, carla_actor, parent, topic_prefix=None, append_role_name_topic_postfix=True):
+    def __init__(self, uid, name, parent, node, carla_actor):
         """
         Constructor
 
+        :param uid: unique identifier for this object
+        :type uid: int
+        :param name: name identiying this object
+        :type name: string
+        :param parent: the parent of this
+        :type parent: carla_cyber_bridge.Parent
+        :param node: node-handle
+        :type node: CompatibleNode
         :param carla_actor: carla actor object
         :type carla_actor: carla.Actor
-        :param parent: the parent of this
-        :type parent: carla_ros_bridge.Parent
-        :param topic_prefix: the topic prefix to be used for this actor
-        :type topic_prefix: string
-        :param append_role_name_topic_postfix: if this flag is set True,
-            the role_name of the actor is used as topic postfix
-        :type append_role_name_topic_postfix: boolean
         """
-        if topic_prefix is None:
-            topic_prefix = 'spectator'
-        super(Spectator, self).__init__(carla_actor=carla_actor,
+        super(Spectator, self).__init__(uid=uid,
+                                        name=name,
                                         parent=parent,
-                                        topic_prefix=topic_prefix,
-                                        append_role_name_topic_postfix=append_role_name_topic_postfix)  # pylint: disable=line-too-long
+                                        node=node,
+                                        carla_actor=carla_actor)

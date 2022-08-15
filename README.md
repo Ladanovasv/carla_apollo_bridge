@@ -156,15 +156,6 @@ Click the 'Route Editing' button on the sidebar.  Click on the map to place poin
 The example scripts use a ground truth obstacle sensor instead of Apollo perception.  This is enable by including object_sensor in [config/settings.yaml](config/settings.yaml).
 ![groundtruth](https://user-images.githubusercontent.com/3516571/75207429-8b463380-572d-11ea-8179-32603690531c.png)
 
-##### Apollo perception module
-
-To use Apollo perception, remove obstacle_sensor from [config/settings.yaml](config/settings.yaml) and enable the 'Transform' and 'Perception' modules.
-![apollo_percpetion](https://user-images.githubusercontent.com/3516571/75207991-225fbb00-572f-11ea-856c-09f7c4e977a4.png)
-
-#### Prediction
-
-Once obstacles are being published, either from Apollo perception or the ground truth obstacle sensor, you can enable the 'Prediction' module.
-![prediction](https://user-images.githubusercontent.com/3516571/75208064-59ce6780-572f-11ea-9362-92dc38145a8f.png)
 
 #### Planning
 

@@ -123,8 +123,8 @@ In another terminal...
 
 ```
 # run in carla-cyber container
-cd /apollo/cyber/carla_bridge
-python carla_spawn_object/carla_spawn_object.py
+cd /apollo/cyber/carla_bridge/carla_spawn_objects
+python carla_spawn_objects.py
 ```
 
 

@@ -122,10 +122,9 @@ python carla_cyber_bridge/bridge.py
 In another terminal...
 
 ```
-# run in carla-apollo container in another terminal:
-
-cd ~/carla_apollo_bridge
-python examples/manual_control.py
+# run in carla-cyber container
+cd /apollo/cyber/carla_bridge
+python carla_spawn_object/carla_spawn_object.py
 ```
 
 

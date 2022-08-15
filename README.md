@@ -1,6 +1,6 @@
 # Carla Apollo Bridge
 
-This python package provides a bridge for communicating between Apollo's Python API and Carla.  Besides the source code, a Dockerfile and scripts are provided for getting setup quickly and easily.  This package was tested with Carla version 0.9.6, and Apollo v5.0.0.
+This python package provides a bridge for communicating between Apollo's Python API and Carla.  Besides the source code, a Dockerfile and scripts are provided for getting setup quickly and easily.  This package was tested with Carla version 0.9.12, and Apollo v5.0.0.
 
 Apollo runs on the [Cyber RT](https://medium.com/@apollo.baidu/apollo-cyber-rt-the-runtime-framework-youve-been-waiting-for-70cfed04eade) framework. This is a cyber port of the work done here: [https://github.com/carla-simulator/ros-bridge](https://github.com/carla-simulator/ros-bridge)
 
@@ -48,14 +48,9 @@ Now in the apollo container, build apollo...
 ./apollo.sh build_gpu
 ```
 
-### Run Carla docker container
-
-This container will run the carla simulator.
-
+### Run Carla 
 ```
-# run on local machine:
-
-docker run --gpus=all --name=carla-server --net=host -d carlasim/carla:0.9.6
+./CarlaUE4.sh
 ```
 
 ### Build docker image / run container for Carla-Apollo bridge
@@ -113,8 +108,15 @@ Run these commands inside the carla-apollo container
 ```
 # run in carla-apollo container:
 
-cd ~/carla_apollo_bridge
-python examples/run_bridge.py
+pip install carla_python/carla/dist/carla-0.9.12-cp27-cp27mu-manylinux_2_27_x86_64.whl 
+```
+Delete files in docker carla-apollo  /root/.cache/bazel/_bazel_root/install
+```
+# run in carla-apollo container
+cd /apollo
+./apollo.sh build_cyber
+cd /apollo/cyber/carla_bridge
+python carla_cyber_bridge/bridge.py
 ```
 
 In another terminal...
@@ -126,21 +128,6 @@ cd ~/carla_apollo_bridge
 python examples/manual_control.py
 ```
 
-#### Interfacing with the simulation
-
-For interfacing with the simulator, a copy of the Carla PythonAPI is included in the carla-apollo container.  Some uses:
-
-```
-# run in another carla-apollo container terminal:
-cd ~/carla_apollo_bridge/carla-python-0.9.6
-
-# change the map
-python util/config.py -m Town04 --host 172.17.0.1
-
-# spawn traffic
-python examples/spawn_npc.py -n 50 --host 172.17.0.1
-
-```
 
 ### Run Apollo Dreamview & modules
 
@@ -154,15 +141,6 @@ Now, in the apollo container, run dreamview:
 
 Then, in a web browser, go to: `localhost:8888`
 
-#### View camera feed
-
-Click the 'Tasks' button on the sidebar to open the Tasks Toolbar.  Click the 'Camera Sensor' switch.
-![camera](https://user-images.githubusercontent.com/3516571/75204973-5931d300-5727-11ea-828c-68ecb5ba2063.png)
-
-#### View point cloud
-
-Click the 'Layer Menu' button on the sidebar.  Click the 'Point Cloud' switch under 'Perception'.
-![pointcloud](https://user-images.githubusercontent.com/3516571/75205481-c003bc00-5728-11ea-8177-d75a46978470.png)
 
 #### Routing
 
@@ -197,12 +175,3 @@ Once a route has been planned, and prediction output is received you can enable 
 #### Control
 If the 'Control' module is enabled, the bridge will apply its output to the ego vehicle, but this feature has not been fully developed yet.  So, the ego's movement may be erratic.  The recommended way to use the bridge is to allow it to use the planner output for moving the vehicle.
 
-## Known Issues
-
-- Traffic lights, stop signs not in the HD Map.  This is because they are not included in the Carla OpenDRIVE maps.
-- When closing the bridge sometimes objects aren't cleaned up properly and cyber will error due to duplicate nodes.  The easiest solution is to reload the map in Carla:
-```
-root@7243ed7667bd:~/carla_apollo_bridge# python carla-python-0.9.6/util/config.py --host 172.17.0.1 -r
-```
-- Running the Carla server and Apollo on the same machine requires a lot of resources, so performance may be choppy.
-- Ego vehicle movement sometimes gets jumpy when being moved along planned trajectory.
